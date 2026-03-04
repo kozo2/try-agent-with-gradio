@@ -482,9 +482,8 @@ def run_agent(user_message: str, chat_history: list, api_key: str) -> str:
     client = OpenAI(api_key=api_key)
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for human, ai in chat_history:
-        messages.append({"role": "user", "content": human})
-        messages.append({"role": "assistant", "content": ai})
+    for msg in chat_history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": user_message})
 
     max_iterations = 10
@@ -547,16 +546,16 @@ def run_agent(user_message: str, chat_history: list, api_key: str) -> str:
 def process_message(message: str, history: list, api_key: str):
     global current_fig
     if not api_key or api_key.strip() == "":
-        return history + [[message, "⚠️ OpenAI APIキーを入力してください。"]], None
+        return history + [{"role": "user", "content": message}, {"role": "assistant", "content": "⚠️ OpenAI APIキーを入力してください。"}], None
     if not message.strip():
         return history, None
     try:
         response = run_agent(message, history, api_key.strip())
         fig_to_show = current_fig
-        return history + [[message, response]], fig_to_show
+        return history + [{"role": "user", "content": message}, {"role": "assistant", "content": response}], fig_to_show
     except Exception as e:
         error_msg = f"❌ エラーが発生しました: {str(e)}"
-        return history + [[message, error_msg]], None
+        return history + [{"role": "user", "content": message}, {"role": "assistant", "content": error_msg}], None
 
 
 def clear_all():
@@ -599,7 +598,7 @@ SAMPLE_PROMPTS = [
     "🌍 GapMinderデータで一人当たりGDPの分布をヒストグラムで表示"
 ]
 
-with gr.Blocks(css=CSS, title="📊 CSV Data Viz Agent") as demo:
+with gr.Blocks(title="📊 CSV Data Viz Agent") as demo:
     gr.HTML("""
     
         📊 CSV Data Visualization Agent
@@ -618,7 +617,7 @@ with gr.Blocks(css=CSS, title="📊 CSV Data Viz Agent") as demo:
                 type="password",
                 value=OPENAI_API_KEY if OPENAI_API_KEY != "your-api-key-here" else ""
             )
-            chatbot = gr.Chatbot(label="会話履歴", height=450, bubble_full_width=False)
+            chatbot = gr.Chatbot(label="会話履歴", height=450)
             with gr.Row():
                 msg_input = gr.Textbox(
                     placeholder="例: タイタニックデータを可視化して",
@@ -675,4 +674,4 @@ with gr.Blocks(css=CSS, title="📊 CSV Data Viz Agent") as demo:
     clear_btn.click(fn=clear_all, outputs=[chatbot, plot_output, msg_input])
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=False, debug=True)
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=False, debug=True, css=CSS)
