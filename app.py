@@ -8,16 +8,16 @@ import requests
 import io
 import os
 import json
-from langchain_openai import ChatOpenAI
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain.tools import tool
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.schema import HumanMessage, AIMessage
+import traceback
+from openai import OpenAI
 
 current_fig = None
 _current_df = None
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "your-api-key-here")
 
+# ========================
+# 日本語フォント設定
+# ========================
 def setup_japanese_font():
     font_candidates = [
         'Noto Sans CJK JP', 'IPAGothic', 'IPAPGothic',
@@ -34,15 +34,10 @@ def setup_japanese_font():
 
 setup_japanese_font()
 
-@tool
-def fetch_csv_from_url(url: str) -> str:
-    """
-    指定されたURLからCSVデータを取得してJSON形式で返す。
-    引数:
-        url: CSVファイルのURL
-    戻り値:
-        CSVデータのJSON文字列（最初の10行）と列名情報
-    """
+# ========================
+# Tool 実装
+# ========================
+def fetch_csv_from_url(url: str) -> dict:
     global _current_df
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -57,9 +52,9 @@ def fetch_csv_from_url(url: str) -> str:
             except (UnicodeDecodeError, pd.errors.ParserError):
                 continue
         if df is None:
-            return json.dumps({"error": "CSVの読み込みに失敗しました"}, ensure_ascii=False)
+            return {"error": "CSVの読み込みに失敗しました"}
         _current_df = df
-        info = {
+        return {
             "status": "success",
             "shape": list(df.shape),
             "columns": list(df.columns),
@@ -67,22 +62,13 @@ def fetch_csv_from_url(url: str) -> str:
             "head": df.head(10).to_dict(orient='records'),
             "describe": df.describe().to_dict() if len(df.select_dtypes(include='number').columns) > 0 else {}
         }
-        return json.dumps(info, ensure_ascii=False, default=str)
     except requests.exceptions.RequestException as e:
-        return json.dumps({"error": f"データ取得エラー: {str(e)}"}, ensure_ascii=False)
+        return {"error": f"データ取得エラー: {str(e)}"}
     except Exception as e:
-        return json.dumps({"error": f"予期しないエラー: {str(e)}"}, ensure_ascii=False)
+        return {"error": f"予期しないエラー: {str(e)}"}
 
 
-@tool
-def get_popular_csv_datasets(topic: str) -> str:
-    """
-    トピックに関連する公開CSVデータセットのURLを返す。
-    引数:
-        topic: データセットのトピック（例: 'population', 'covid', 'weather', 'stock', 'titanic'）
-    戻り値:
-        利用可能なURLリスト
-    """
+def get_popular_csv_datasets(topic: str) -> list:
     datasets = {
         "titanic": {
             "url": "https://raw.githubusercontent.com/datasciencedojo/datasets/master/titanic.csv",
@@ -126,7 +112,6 @@ def get_popular_csv_datasets(topic: str) -> str:
         }
     }
     topic_lower = topic.lower()
-    results = []
     keyword_map = {
         "タイタニック": "titanic", "titanic": "titanic",
         "アイリス": "iris", "iris": "iris", "花": "iris",
@@ -143,25 +128,17 @@ def get_popular_csv_datasets(topic: str) -> str:
     for keyword, key in keyword_map.items():
         if keyword in topic_lower:
             matched_keys.add(key)
+    results = []
     if matched_keys:
         for key in matched_keys:
             if key in datasets:
-                results.append({
-                    "key": key,
-                    "url": datasets[key]["url"],
-                    "description": datasets[key]["description"]
-                })
+                results.append({"key": key, "url": datasets[key]["url"], "description": datasets[key]["description"]})
     else:
         for key, data in datasets.items():
-            results.append({
-                "key": key,
-                "url": data["url"],
-                "description": data["description"]
-            })
-    return json.dumps(results, ensure_ascii=False)
+            results.append({"key": key, "url": data["url"], "description": data["description"]})
+    return results
 
 
-@tool
 def create_visualization(
     chart_type: str,
     x_column: str = "",
@@ -169,23 +146,11 @@ def create_visualization(
     title: str = "データ可視化",
     hue_column: str = "",
     top_n: int = 20
-) -> str:
-    """
-    取得済みのCSVデータを可視化する。fetch_csv_from_urlで取得後に呼び出す。
-    引数:
-        chart_type: グラフ種類 ('bar', 'line', 'scatter', 'hist', 'pie', 'box', 'heatmap', 'area')
-        x_column: X軸の列名
-        y_column: Y軸の列名（複数の場合はカンマ区切り）
-        title: グラフのタイトル
-        hue_column: 色分けに使用する列名
-        top_n: 上位N件を表示（bar/pieの場合）
-    戻り値:
-        作図の成否とメッセージ
-    """
+) -> dict:
     global current_fig, _current_df
     try:
         if _current_df is None:
-            return json.dumps({"error": "データが読み込まれていません。先にfetch_csv_from_urlを使用してください。"}, ensure_ascii=False)
+            return {"error": "データが読み込まれていません。先にfetch_csv_from_urlを使用してください。"}
         df = _current_df.copy()
         numeric_cols = df.select_dtypes(include='number').columns.tolist()
         categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
@@ -193,7 +158,7 @@ def create_visualization(
             x_column = categorical_cols[0] if categorical_cols else df.columns[0]
         if not y_column and len(numeric_cols) > 0:
             y_column = numeric_cols[0]
-        y_columns = [col.strip() for col in y_column.split(',') if col.strip() in df.columns] if y_column else [numeric_cols[0]] if numeric_cols else []
+        y_columns = [col.strip() for col in y_column.split(',') if col.strip() in df.columns] if y_column else ([numeric_cols[0]] if numeric_cols else [])
         plt.close('all')
         fig, ax = plt.subplots(figsize=(12, 7))
         fig.patch.set_facecolor('#1a1a2e')
@@ -217,7 +182,7 @@ def create_visualization(
                     ax.set_ylabel(y_columns[0] if y_columns else '', color='white')
                     for bar in bars:
                         height = bar.get_height()
-                        ax.text(bar.get_x() + bar.get_width()/2., height,
+                        ax.text(bar.get_x() + bar.get_width() / 2., height,
                                 f'{height:.1f}', ha='center', va='bottom', color='white', fontsize=7)
                 else:
                     if numeric_cols:
@@ -273,10 +238,7 @@ def create_visualization(
 
         elif chart_type == 'pie':
             if x_column in df.columns:
-                if x_column in categorical_cols:
-                    plot_data = df[x_column].value_counts().head(top_n)
-                else:
-                    plot_data = df[x_column].head(top_n)
+                plot_data = df[x_column].value_counts().head(top_n) if x_column in categorical_cols else df[x_column].head(top_n)
                 wedge_colors = plt.cm.Set3(range(len(plot_data)))
                 wedges, texts, autotexts = ax.pie(
                     plot_data.values, labels=plot_data.index, autopct='%1.1f%%',
@@ -318,7 +280,7 @@ def create_visualization(
                     for j in range(len(corr_cols)):
                         ax.text(j, i, f'{corr.iloc[i, j]:.2f}', ha='center', va='center', color='white', fontsize=7)
             else:
-                return json.dumps({"error": "ヒートマップには2列以上の数値データが必要です"}, ensure_ascii=False)
+                return {"error": "ヒートマップには2列以上の数値データが必要です"}
 
         elif chart_type == 'area':
             if y_columns:
@@ -333,34 +295,25 @@ def create_visualization(
         ax.set_title(title, color='white', fontsize=14, fontweight='bold', pad=15)
         plt.tight_layout()
         current_fig = fig
-        return json.dumps({
+        return {
             "status": "success",
             "message": f"{chart_type}チャートを作成しました: {title}",
             "chart_type": chart_type,
             "x_column": x_column,
             "y_columns": y_columns
-        }, ensure_ascii=False)
+        }
     except Exception as e:
-        import traceback
-        return json.dumps({"error": f"可視化エラー: {str(e)}", "traceback": traceback.format_exc()}, ensure_ascii=False)
+        return {"error": f"可視化エラー: {str(e)}", "traceback": traceback.format_exc()}
 
 
-@tool
-def analyze_dataframe(analysis_type: str = "summary") -> str:
-    """
-    取得済みのデータフレームを分析する。
-    引数:
-        analysis_type: 'summary'（統計情報）, 'missing'（欠損値）, 'correlation'（相関）, 'columns'（列情報）
-    戻り値:
-        分析結果のJSON文字列
-    """
+def analyze_dataframe(analysis_type: str = "summary") -> dict:
     global _current_df
     try:
         if _current_df is None:
-            return json.dumps({"error": "データが読み込まれていません"}, ensure_ascii=False)
+            return {"error": "データが読み込まれていません"}
         df = _current_df
         if analysis_type == "summary":
-            result = {
+            return {
                 "shape": list(df.shape),
                 "columns": list(df.columns),
                 "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
@@ -368,50 +321,139 @@ def analyze_dataframe(analysis_type: str = "summary") -> str:
             }
         elif analysis_type == "missing":
             missing = df.isnull().sum()
-            result = {
+            return {
                 "missing_values": {col: int(val) for col, val in missing.items()},
-                "missing_percentage": {col: float(f"{(val/len(df)*100):.2f}") for col, val in missing.items()}
+                "missing_percentage": {col: float(f"{(val / len(df) * 100):.2f}") for col, val in missing.items()}
             }
         elif analysis_type == "correlation":
             numeric_cols = df.select_dtypes(include='number').columns.tolist()
             if len(numeric_cols) >= 2:
                 corr = df[numeric_cols].corr()
-                result = {"correlation_matrix": corr.to_dict()}
+                return {"correlation_matrix": corr.to_dict()}
             else:
-                result = {"error": "相関計算には2列以上の数値データが必要です"}
+                return {"error": "相関計算には2列以上の数値データが必要です"}
         elif analysis_type == "columns":
-            result = {
+            return {
                 "numeric_columns": df.select_dtypes(include='number').columns.tolist(),
                 "categorical_columns": df.select_dtypes(include=['object', 'category']).columns.tolist(),
                 "datetime_columns": df.select_dtypes(include='datetime').columns.tolist(),
                 "total_rows": len(df)
             }
         else:
-            result = {"error": f"不明な分析タイプ: {analysis_type}"}
-        return json.dumps(result, ensure_ascii=False, default=str)
+            return {"error": f"不明な分析タイプ: {analysis_type}"}
     except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
+        return {"error": str(e)}
 
 
-def create_agent(api_key: str):
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0,
-        openai_api_key=api_key,
-        streaming=False
-    )
-    tools = [fetch_csv_from_url, get_popular_csv_datasets, create_visualization, analyze_dataframe]
-    system_prompt = """あなたはデータ分析と可視化の専門家AIアシスタントです。
+# ========================
+# Tool定義 (OpenAI Function Calling形式)
+# ========================
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_popular_csv_datasets",
+            "description": "トピックに関連する公開CSVデータセットのURLを返す",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "データセットのトピック（例: titanic, iris, covid, 人口, 株）"
+                    }
+                },
+                "required": ["topic"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_csv_from_url",
+            "description": "指定されたURLからCSVデータを取得して読み込む",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "CSVファイルのURL"
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_dataframe",
+            "description": "取得済みのデータフレームを分析する",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "analysis_type": {
+                        "type": "string",
+                        "enum": ["summary", "missing", "correlation", "columns"],
+                        "description": "分析タイプ: summary（統計情報）, missing（欠損値）, correlation（相関）, columns（列情報）"
+                    }
+                },
+                "required": ["analysis_type"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_visualization",
+            "description": "取得済みのCSVデータをmatplotlibで可視化する。fetch_csv_from_urlでデータ取得後に呼び出す。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chart_type": {
+                        "type": "string",
+                        "enum": ["bar", "line", "scatter", "hist", "pie", "box", "heatmap", "area"],
+                        "description": "グラフの種類"
+                    },
+                    "x_column": {
+                        "type": "string",
+                        "description": "X軸に使用する列名"
+                    },
+                    "y_column": {
+                        "type": "string",
+                        "description": "Y軸に使用する列名（複数の場合はカンマ区切り）"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "グラフのタイトル"
+                    },
+                    "hue_column": {
+                        "type": "string",
+                        "description": "色分けに使用する列名"
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "上位N件を表示（bar/pieの場合）",
+                        "default": 20
+                    }
+                },
+                "required": ["chart_type"]
+            }
+        }
+    }
+]
+
+TOOL_FUNCTIONS = {
+    "get_popular_csv_datasets": get_popular_csv_datasets,
+    "fetch_csv_from_url": fetch_csv_from_url,
+    "analyze_dataframe": analyze_dataframe,
+    "create_visualization": create_visualization,
+}
+
+SYSTEM_PROMPT = """あなたはデータ分析と可視化の専門家AIアシスタントです。
 ユーザーのリクエストに応じて以下のことができます：
 1. インターネット上の公開CSVデータをURLから取得
 2. 取得したデータの統計情報や特徴を分析
 3. matplotlibを使ってグラフを作成
-
-利用可能なツール:
-- get_popular_csv_datasets: トピックに応じた公開データセットのURLを取得
-- fetch_csv_from_url: URLからCSVデータを取得・読み込み
-- analyze_dataframe: データの統計情報や列情報を分析
-- create_visualization: グラフを作成（bar/line/scatter/hist/pie/box/heatmap/area）
 
 作業フロー:
 1. ユーザーのリクエストからトピックを理解
@@ -431,41 +473,87 @@ def create_agent(api_key: str):
 - 相関行列 → heatmap
 
 常に日本語で丁寧に回答し、データの特徴や興味深い発見をわかりやすく説明してください。"""
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
-    ])
-    agent = create_openai_tools_agent(llm, tools, prompt)
-    agent_executor = AgentExecutor(
-        agent=agent,
-        tools=tools,
-        verbose=True,
-        max_iterations=10,
-        handle_parsing_errors=True,
-        return_intermediate_steps=False
-    )
-    return agent_executor
 
 
+# ========================
+# Agent ループ
+# ========================
+def run_agent(user_message: str, chat_history: list, api_key: str) -> str:
+    client = OpenAI(api_key=api_key)
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for human, ai in chat_history:
+        messages.append({"role": "user", "content": human})
+        messages.append({"role": "assistant", "content": ai})
+    messages.append({"role": "user", "content": user_message})
+
+    max_iterations = 10
+    for _ in range(max_iterations):
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            tools=TOOLS,
+            tool_choice="auto",
+            temperature=0
+        )
+        message = response.choices[0].message
+
+        # tool_callsがない場合 → 最終回答
+        if not message.tool_calls:
+            return message.content or "応答を取得できませんでした。"
+
+        # assistantメッセージをmessagesに追加
+        messages.append({
+            "role": "assistant",
+            "content": message.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                    }
+                }
+                for tc in message.tool_calls
+            ]
+        })
+
+        # 各tool_callを実行
+        for tool_call in message.tool_calls:
+            func_name = tool_call.function.name
+            try:
+                func_args = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
+                func_args = {}
+
+            if func_name in TOOL_FUNCTIONS:
+                result = TOOL_FUNCTIONS[func_name](**func_args)
+            else:
+                result = {"error": f"未知のツール: {func_name}"}
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": json.dumps(result, ensure_ascii=False, default=str)
+            })
+
+    return "処理が完了しませんでした。もう一度お試しください。"
+
+
+# ========================
+# Gradio 処理
+# ========================
 def process_message(message: str, history: list, api_key: str):
-    global current_fig, _current_df
+    global current_fig
     if not api_key or api_key.strip() == "":
         return history + [[message, "⚠️ OpenAI APIキーを入力してください。"]], None
     if not message.strip():
         return history, None
     try:
-        agent = create_agent(api_key.strip())
-        chat_history = []
-        for human, ai in history:
-            chat_history.append(HumanMessage(content=human))
-            chat_history.append(AIMessage(content=ai))
-        result = agent.invoke({"input": message, "chat_history": chat_history})
-        response = result.get("output", "処理に失敗しました。")
+        response = run_agent(message, history, api_key.strip())
         fig_to_show = current_fig
-        new_history = history + [[message, response]]
-        return new_history, fig_to_show
+        return history + [[message, response]], fig_to_show
     except Exception as e:
         error_msg = f"❌ エラーが発生しました: {str(e)}"
         return history + [[message, error_msg]], None
@@ -479,6 +567,9 @@ def clear_all():
     return [], None, ""
 
 
+# ========================
+# Gradio UI
+# ========================
 CSS = """
 .gradio-container {
     background: linear-gradient(135deg, #0f0c29, #302b63, #24243e) !important;
@@ -517,6 +608,7 @@ with gr.Blocks(css=CSS, title="📊 CSV Data Viz Agent") as demo:
         
     
     """)
+
     with gr.Row():
         with gr.Column(scale=1):
             gr.HTML('💬 チャット')
@@ -541,9 +633,10 @@ with gr.Blocks(css=CSS, title="📊 CSV Data Viz Agent") as demo:
                         fn=lambda x=SAMPLE_PROMPTS[i]: x, outputs=msg_input
                     )
                     if i + 1 < len(SAMPLE_PROMPTS):
-                        gr.Button(SAMPLE_PROMPTS[i+1], elem_classes=["sample-btn"], size="sm").click(
-                            fn=lambda x=SAMPLE_PROMPTS[i+1]: x, outputs=msg_input
+                        gr.Button(SAMPLE_PROMPTS[i + 1], elem_classes=["sample-btn"], size="sm").click(
+                            fn=lambda x=SAMPLE_PROMPTS[i + 1]: x, outputs=msg_input
                         )
+
         with gr.Column(scale=1):
             gr.HTML('📈 可視化結果')
             plot_output = gr.Plot(label="グラフ", elem_id="plot-output")
